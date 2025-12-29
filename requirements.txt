@@ -1,0 +1,13 @@
+fastapi
+pydantic
+sqlalchemy[asyncio]
+asyncpg
+httpx
+python-dotenv
+openrouter
+typing-extensions
+pytest
+pytest-asyncio
+alembic
+databases
+uvicorn
