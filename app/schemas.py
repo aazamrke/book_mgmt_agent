@@ -12,6 +12,12 @@ class BookBase(BaseModel):
 class BookCreate(BookBase):
     pass
 
+class BookUpdate(BaseModel):
+    title: Optional[str] = None
+    author: Optional[str] = None
+    genre: Optional[str] = None
+    year_published: Optional[int] = None
+    summary: Optional[str] = None
 
 class BookResponse(BookBase):
     id: int
