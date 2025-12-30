@@ -25,3 +25,22 @@ class BookResponse(BookBase):
 
     class Config:
         from_attributes = True  # ✅ REQUIRED for SQLAlchemy
+
+class ReviewCreate(BaseModel):
+    user_id: int
+    review_text: str
+    rating: float
+
+
+class ReviewResponse(ReviewCreate):
+    id: int
+    book_id: int
+
+    class Config:
+        from_attributes = True
+
+class GenerateSummaryRequest(BaseModel):
+    content: str
+
+class GenerateSummaryResponse(BaseModel):
+    summary: str
