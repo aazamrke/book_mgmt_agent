@@ -11,3 +11,8 @@ pytest-asyncio
 alembic
 databases
 uvicorn
+sentence-transformers
+numpy
+scikit-learn
+python-jose[cryptography]
+passlib[bcrypt]

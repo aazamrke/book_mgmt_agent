@@ -34,6 +34,6 @@ async def generate_summary_llama3(prompt: str) -> str:
                 ],
             },
         )
-        resp.raise_for_status()
+        # resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
 

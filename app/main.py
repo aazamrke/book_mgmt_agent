@@ -10,8 +10,22 @@ from app.schemas import BookCreate, BookResponse, BookUpdate
 from app.schemas import ReviewCreate, ReviewResponse
 from app.models import Book
 from typing import List
+from app.routes import auth, users, documents, ingestion
+from fastapi.middleware.cors import CORSMiddleware
+# from app.rag_pipeline import rag_pipeline
 
 app = FastAPI(title="Intelligent Book Management System")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(documents.router)
+app.include_router(ingestion.router)
 
 @app.post("/books",response_model=BookResponse)
 async def add_book(
@@ -22,6 +36,10 @@ async def add_book(
     db.add(db_book)
     await db.commit()
     await db.refresh(db_book)
+    
+    # Index book for RAG - temporarily disabled
+    # await rag_pipeline.index_book(db, db_book.id)
+    
     return db_book
 
 @app.get("/books", response_model=List[BookResponse])
@@ -61,6 +79,9 @@ async def update_book_by_id(book_id: int,book_update: BookUpdate,db: AsyncSessio
 
     await db.commit()
     await db.refresh(book)
+    
+    # Reindex book for RAG - temporarily disabled
+    # await rag_pipeline.index_book(db, book.id)
 
     return book
 
@@ -109,6 +130,9 @@ async def add_review_for_book(
     db.add(db_review)
     await db.commit()
     await db.refresh(db_review)
+    
+    # Reindex book to include new review - temporarily disabled
+    # await rag_pipeline.index_book(db, book_id)
 
     return db_review
 
@@ -212,4 +236,14 @@ async def generate_summary_from_content(
 @app.get("/recommendations")
 async def recommendations(genre: str, db: AsyncSession = Depends(get_db)):
     return await recommend_books(db, genre)
+
+@app.post("/search")
+async def search_books(query: str, limit: int = 5):
+    """Search books using RAG pipeline - temporarily disabled"""
+    return {"query": query, "results": [], "message": "RAG search temporarily disabled"}
+
+@app.post("/books/{book_id}/reindex")
+async def reindex_book(book_id: int, db: AsyncSession = Depends(get_db)):
+    """Manually reindex a book for RAG - temporarily disabled"""
+    return {"message": f"Book {book_id} reindexing temporarily disabled"}
 
