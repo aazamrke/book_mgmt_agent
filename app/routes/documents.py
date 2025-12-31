@@ -101,6 +101,29 @@ async def download_document(document_id: int, db: AsyncSession = Depends(get_db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
+@router.post("/{document_id}/summary")
+async def generate_document_summary(document_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    document = result.scalar_one_or_none()
+    
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    
+    try:
+        from app.llama3 import generate_summary_llama3
+        
+        # Generate summary based on document metadata
+        content = f"Document: {document.filename}\nUploaded: {document.uploaded_at}\nSize: {document.file_size} bytes"
+        summary = await generate_summary_llama3(f"Summarize this document information: {content}")
+        
+        return {
+            "document_id": document.id,
+            "filename": document.filename,
+            "summary": summary
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
+
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(verify_user)])
 async def delete_document(document_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Document).where(Document.id == document_id))
