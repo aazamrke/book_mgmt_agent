@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=book_mgmt
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - USE_S3=false
+    depends_on:
+      - db
+    volumes:
+      - ./.env:/app/.env
+
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=book_mgmt
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
