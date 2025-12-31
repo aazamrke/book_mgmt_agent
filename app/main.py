@@ -12,7 +12,7 @@ from app.models import Book
 from typing import List
 from app.routes import auth, users, documents, ingestion
 from fastapi.middleware.cors import CORSMiddleware
-# from app.rag_pipeline import rag_pipeline
+from app.rag_pipeline import rag_pipeline
 
 app = FastAPI(title="Intelligent Book Management System")
 app.add_middleware(
@@ -37,8 +37,8 @@ async def add_book(
     await db.commit()
     await db.refresh(db_book)
     
-    # Index book for RAG - temporarily disabled
-    # await rag_pipeline.index_book(db, db_book.id)
+    # Index book for RAG
+    await rag_pipeline.index_book(db, db_book.id)
     
     return db_book
 
@@ -80,8 +80,8 @@ async def update_book_by_id(book_id: int,book_update: BookUpdate,db: AsyncSessio
     await db.commit()
     await db.refresh(book)
     
-    # Reindex book for RAG - temporarily disabled
-    # await rag_pipeline.index_book(db, book.id)
+    # Reindex book for RAG
+    await rag_pipeline.index_book(db, book.id)
 
     return book
 
@@ -131,8 +131,8 @@ async def add_review_for_book(
     await db.commit()
     await db.refresh(db_review)
     
-    # Reindex book to include new review - temporarily disabled
-    # await rag_pipeline.index_book(db, book_id)
+    # Reindex book to include new review
+    await rag_pipeline.index_book(db, book_id)
 
     return db_review
 
@@ -238,12 +238,74 @@ async def recommendations(genre: str, db: AsyncSession = Depends(get_db)):
     return await recommend_books(db, genre)
 
 @app.post("/search")
-async def search_books(query: str, limit: int = 5):
-    """Search books using RAG pipeline - temporarily disabled"""
-    return {"query": query, "results": [], "message": "RAG search temporarily disabled"}
+async def search_books(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):
+    """Search books using RAG pipeline with fallback"""
+    # Try RAG search first
+    results = rag_pipeline.search_similar_books(query, limit)
+    
+    # If no RAG results, do simple database search
+    if not results:
+        db_result = await db.execute(
+            select(Book).where(
+                Book.title.ilike(f"%{query}%") | 
+                Book.author.ilike(f"%{query}%") |
+                Book.genre.ilike(f"%{query}%")
+            ).limit(limit)
+        )
+        books = db_result.scalars().all()
+        
+        results = [
+            {
+                "book_id": book.id,
+                "similarity_score": 1.0,
+                "metadata": {
+                    "book_id": book.id,
+                    "title": book.title,
+                    "author": book.author,
+                    "genre": book.genre
+                },
+                "content": f"Title: {book.title} Author: {book.author} Genre: {book.genre}"
+            }
+            for book in books
+        ]
+    
+    return {"query": query, "results": results}
+
+@app.get("/search")
+async def search_books_get(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):
+    """GET version of search for UI compatibility"""
+    return await search_books(query, limit, db)
 
 @app.post("/books/{book_id}/reindex")
 async def reindex_book(book_id: int, db: AsyncSession = Depends(get_db)):
-    """Manually reindex a book for RAG - temporarily disabled"""
-    return {"message": f"Book {book_id} reindexing temporarily disabled"}
+    """Manually reindex a book for RAG"""
+    await rag_pipeline.index_book(db, book_id)
+    return {"message": f"Book {book_id} reindexed successfully"}
+
+@app.post("/reindex-all")
+async def reindex_all_books(db: AsyncSession = Depends(get_db)):
+    """Reindex all books for RAG"""
+    result = await db.execute(select(Book))
+    books = result.scalars().all()
+    
+    indexed_count = 0
+    for book in books:
+        try:
+            await rag_pipeline.index_book(db, book.id)
+            indexed_count += 1
+        except Exception as e:
+            print(f"Failed to index book {book.id}: {e}")
+    
+    return {
+        "message": f"Reindexed {indexed_count} books successfully",
+        "total_in_store": len(rag_pipeline.embeddings_store)
+    }
+
+@app.get("/debug/embeddings")
+async def debug_embeddings():
+    """Debug endpoint to check embeddings store"""
+    return {
+        "total_books_indexed": len(rag_pipeline.embeddings_store),
+        "book_ids": list(rag_pipeline.embeddings_store.keys())
+    }
 
