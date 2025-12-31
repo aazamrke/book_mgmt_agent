@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # AWS
     AWS_REGION: str = "us-east-1"
+    AWS_ACCESS_KEY_ID: str | None = None
+    AWS_SECRET_ACCESS_KEY: str | None = None
     S3_BUCKET_NAME: str | None = None
 
     model_config = SettingsConfigDict(

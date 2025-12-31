@@ -16,3 +16,4 @@ numpy
 scikit-learn
 python-jose[cryptography]
 passlib[bcrypt]
+boto3
