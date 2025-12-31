@@ -79,8 +79,7 @@ class Document(Base):
 
     id = Column(Integer, primary_key=True)
     filename = Column(String(255))
-    s3_key = Column(String(500))  # S3 object key
-    file_size = Column(Integer)  # File size in bytes
+    file_size = Column(Integer, default=0)  # File size in bytes
     uploaded_by = Column(Integer, ForeignKey("users.id"))
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     status = Column(String(50), default="uploaded")  # uploaded | ingested | failed

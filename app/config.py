@@ -3,10 +3,11 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # App
+    # Environment
     APP_NAME: str = "Intelligent Book Management System"
     APP_ENV: str = "development"
     DEBUG: bool = True
+    USE_S3: bool = False  # Enable S3 only in production
 
     # Database
     DB_HOST: str
