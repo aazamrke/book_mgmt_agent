@@ -10,14 +10,14 @@ class Settings(BaseSettings):
     USE_S3: bool = False  # Enable S3 only in production
 
     # Database
-    DB_HOST: str
+    DB_HOST: str = "localhost"
     DB_PORT: int = 5432
-    DB_NAME: str
-    DB_USER: str
-    DB_PASSWORD: str
+    DB_NAME: str = "book_mgmt"
+    DB_USER: str = "postgres"
+    DB_PASSWORD: str = "password"
 
     # OpenRouter
-    OPENROUTER_API_KEY: str
+    OPENROUTER_API_KEY: str = "dummy_key"
     OPENROUTER_MODEL: str = "meta-llama/llama-3-8b-instruct"
 
     # Security

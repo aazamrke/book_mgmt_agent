@@ -13,6 +13,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY *.py ./
 
+# Set default environment variables
+ENV DB_HOST=localhost
+ENV DB_NAME=book_mgmt
+ENV DB_USER=postgres
+ENV DB_PASSWORD=password
+ENV OPENROUTER_API_KEY=dummy_key
+ENV USE_S3=false
+
 # Create non-root user
 RUN adduser -D -s /bin/sh appuser
 USER appuser
