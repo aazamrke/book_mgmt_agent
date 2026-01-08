@@ -12,7 +12,7 @@ from app.models import Book
 from typing import List
 from app.routes import auth, users, documents, ingestion
 from fastapi.middleware.cors import CORSMiddleware
-from app.rag_pipeline import rag_pipeline
+from app.rag_pipeline_minimal import rag_pipeline
 
 app = FastAPI(title="Intelligent Book Management System")
 app.add_middleware(
