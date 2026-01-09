@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy import text
 from app.database import get_db
 from app.models import User, Role, user_roles
 from app.auth import verify_admin
@@ -35,28 +36,46 @@ async def create_user(user_data: CreateUserRequest, db: AsyncSession = Depends(g
         if result.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Username already exists")
         
-        # Create user
-        user = User(
-            username=user_data.username,
-            password_hash=hash_password(user_data.password)
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
+        # Create user with raw SQL to avoid greenlet issues
+        from sqlalchemy import text
         
-        # Assign roles after user is committed
+        # Insert user
+        user_insert = await db.execute(
+            text("INSERT INTO users (username, password_hash) VALUES (:username, :password_hash) RETURNING id"),
+            {"username": user_data.username, "password_hash": hash_password(user_data.password)}
+        )
+        user_id = user_insert.scalar()
+        
+        # Handle role assignment
         if user_data.role_names:
-            role_result = await db.execute(select(Role).where(Role.name.in_(user_data.role_names)))
-            roles = role_result.scalars().all()
-            if len(roles) != len(user_data.role_names):
-                found_roles = [r.name for r in roles]
-                missing_roles = [r for r in user_data.role_names if r not in found_roles]
-                raise HTTPException(status_code=400, detail=f"Roles not found: {missing_roles}")
-            user.roles = roles
-            await db.commit()
-        return {"message": "User created successfully", "user_id": user.id}
-    except HTTPException:
-        raise
+            for role_name in user_data.role_names:
+                # Get role id
+                role_result = await db.execute(
+                    text("SELECT id FROM roles WHERE name = :role_name"),
+                    {"role_name": role_name}
+                )
+                role_id = role_result.scalar()
+                if role_id:
+                    # Insert user-role relationship
+                    await db.execute(
+                        text("INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"),
+                        {"user_id": user_id, "role_id": role_id}
+                    )
+        else:
+            # Assign default user role
+            role_result = await db.execute(
+                text("SELECT id FROM roles WHERE name = 'user'")
+            )
+            role_id = role_result.scalar()
+            if role_id:
+                await db.execute(
+                    text("INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"),
+                    {"user_id": user_id, "role_id": role_id}
+                )
+        
+        await db.commit()
+        return {"message": "User created successfully", "user_id": user_id}
+        
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
@@ -130,6 +149,13 @@ class CreateRoleRequest(BaseModel):
     can_delete: bool = False
     is_admin: bool = False
 
+class UpdateRoleRequest(BaseModel):
+    name: str = None
+    can_read: bool = None
+    can_write: bool = None
+    can_delete: bool = None
+    is_admin: bool = None
+
 @router.post("/roles", response_model=dict, dependencies=[Depends(verify_admin)])
 async def create_role(role_data: CreateRoleRequest, db: AsyncSession = Depends(get_db)):
     # Check if role exists
@@ -147,6 +173,28 @@ async def create_role(role_data: CreateRoleRequest, db: AsyncSession = Depends(g
     db.add(role)
     await db.commit()
     return {"message": "Role created successfully", "role_id": role.id}
+
+@router.put("/roles/{role_id}", response_model=dict, dependencies=[Depends(verify_admin)])
+async def update_role(role_id: int, role_data: UpdateRoleRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Role).where(Role.id == role_id))
+    role = result.scalar_one_or_none()
+    
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    
+    if role_data.name:
+        role.name = role_data.name
+    if role_data.can_read is not None:
+        role.can_read = role_data.can_read
+    if role_data.can_write is not None:
+        role.can_write = role_data.can_write
+    if role_data.can_delete is not None:
+        role.can_delete = role_data.can_delete
+    if role_data.is_admin is not None:
+        role.is_admin = role_data.is_admin
+    
+    await db.commit()
+    return {"message": "Role updated successfully"}
 
 @router.post("/{user_id}/assign-role")
 async def assign_role_to_user(user_id: int, role_name: str, db: AsyncSession = Depends(get_db)):

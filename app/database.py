@@ -15,8 +15,6 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     # Connection pool settings for production
     poolclass=NullPool,  # Use NullPool for async engines
-    pool_pre_ping=True,  # Validate connections before use
-    pool_recycle=3600,  # Recycle connections every hour
     # Performance settings
     echo=settings.DEBUG,  # SQL logging only in debug mode
     future=True,
@@ -75,19 +73,13 @@ db_health = DatabaseHealthCheck()
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Production-grade database session with proper error handling
+    Simplified database session to avoid greenlet issues
     """
     session = AsyncSessionLocal()
     try:
-        # Check database health periodically
-        if not await db_health.check_health():
-            logger.error("Database unhealthy, but proceeding with request")
-        
         yield session
-        
     except Exception as e:
         await session.rollback()
-        logger.error(f"Database session error: {str(e)}", exc_info=True)
         raise
     finally:
         await session.close()

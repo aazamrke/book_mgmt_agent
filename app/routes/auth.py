@@ -16,41 +16,79 @@ class SignupRequest(BaseModel):
 @router.post("/signup")
 async def signup(data: SignupRequest, db: AsyncSession = Depends(get_db)):
     try:
+        # Check if user exists
+        result = await db.execute(select(User).where(User.username == data.username))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Get or create default user role
+        user_role_result = await db.execute(select(Role).where(Role.name == "user"))
+        user_role = user_role_result.scalar_one_or_none()
+        
+        if not user_role:
+            user_role = Role(
+                name="user",
+                can_read=True,
+                can_write=False,
+                can_delete=False,
+                is_admin=False
+            )
+            db.add(user_role)
+            await db.flush()
+        
+        # Create user
         user = User(
             username=data.username,
             password_hash=hash_password(data.password)
         )
         db.add(user)
+        await db.flush()
+        
+        # Assign default user role
+        user.roles = [user_role]
         await db.commit()
+        
         return {"message": "User registered successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Signup error: {str(e)}")
 
 @router.post("/create-admin")
 async def create_admin(data: SignupRequest, db: AsyncSession = Depends(get_db)):
-    # Check if admin role exists, create if not
-    admin_role_result = await db.execute(select(Role).where(Role.name == "admin"))
-    admin_role = admin_role_result.scalar_one_or_none()
-    
-    if not admin_role:
-        admin_role = Role(name="admin")
-        db.add(admin_role)
+    try:
+        # Check if admin role exists, create if not
+        admin_role_result = await db.execute(select(Role).where(Role.name == "admin"))
+        admin_role = admin_role_result.scalar_one_or_none()
+        
+        if not admin_role:
+            admin_role = Role(
+                name="admin",
+                can_read=True,
+                can_write=True,
+                can_delete=True,
+                is_admin=True
+            )
+            db.add(admin_role)
+            await db.flush()
+        
+        # Create admin user
+        user = User(
+            username=data.username,
+            password_hash=hash_password(data.password)
+        )
+        db.add(user)
         await db.flush()
-    
-    # Create admin user
-    user = User(
-        username=data.username,
-        password_hash=hash_password(data.password)
-    )
-    db.add(user)
-    await db.flush()
-    
-    # Assign admin role
-    user.roles = [admin_role]
-    await db.commit()
-    
-    return {"message": "Admin user created successfully"}
+        
+        # Assign admin role
+        user.roles = [admin_role]
+        await db.commit()
+        
+        return {"message": "Admin user created successfully"}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @router.post("/login")
 async def login(data: SignupRequest, db: AsyncSession = Depends(get_db)):
