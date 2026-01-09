@@ -55,6 +55,10 @@ class Role(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(50), unique=True, nullable=False)
+    can_read = Column(Boolean, default=True)
+    can_write = Column(Boolean, default=False)
+    can_delete = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)
 
     users = relationship(
         "User",

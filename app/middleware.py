@@ -9,33 +9,23 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-class RequestTrackingMiddleware:
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class RequestTrackingMiddleware(BaseHTTPMiddleware):
     """Middleware for request tracking and performance monitoring"""
     
-    def __init__(self, app):
-        self.app = app
-    
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        
+    async def dispatch(self, request: Request, call_next):
         request_id = str(uuid.uuid4())
         start_time = time.time()
         
-        # Add request ID to scope
-        scope["request_id"] = request_id
-        
-        async def send_wrapper(message):
-            if message["type"] == "http.response.start":
-                # Add request ID to response headers
-                headers = dict(message.get("headers", []))
-                headers[b"x-request-id"] = request_id.encode()
-                message["headers"] = list(headers.items())
-            await send(message)
+        # Add request ID to request state
+        request.state.request_id = request_id
         
         try:
-            await self.app(scope, receive, send_wrapper)
+            response = await call_next(request)
+            # Add request ID to response headers
+            response.headers["x-request-id"] = request_id
+            return response
         finally:
             # Log request completion
             duration = time.time() - start_time
@@ -43,8 +33,8 @@ class RequestTrackingMiddleware:
                 f"Request completed",
                 extra={
                     "request_id": request_id,
-                    "method": scope.get("method"),
-                    "path": scope.get("path"),
+                    "method": request.method,
+                    "path": str(request.url.path),
                     "duration_ms": round(duration * 1000, 2)
                 }
             )
@@ -84,15 +74,16 @@ async def error_handler(request: Request, exc: Exception) -> JSONResponse:
         }
     )
 
-class MetricsMiddleware:
+class MetricsMiddleware(BaseHTTPMiddleware):
     """Middleware for collecting application metrics"""
     
-    def __init__(self):
+    def __init__(self, app):
+        super().__init__(app)
         self.request_count = 0
         self.error_count = 0
         self.response_times = []
     
-    async def __call__(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         self.request_count += 1
         
@@ -129,4 +120,15 @@ class MetricsMiddleware:
         }
 
 # Global metrics instance
-metrics = MetricsMiddleware()
+metrics_middleware = MetricsMiddleware
+
+def get_metrics_data():
+    """Get metrics from the middleware instance"""
+    # This will be populated by the actual middleware instance
+    return {
+        "request_count": 0,
+        "error_count": 0,
+        "error_rate": 0,
+        "avg_response_time_ms": 0,
+        "recent_requests": 0
+    }

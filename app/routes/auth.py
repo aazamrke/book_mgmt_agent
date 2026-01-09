@@ -15,13 +15,17 @@ class SignupRequest(BaseModel):
 
 @router.post("/signup")
 async def signup(data: SignupRequest, db: AsyncSession = Depends(get_db)):
-    user = User(
-        username=data.username,
-        password_hash=hash_password(data.password)
-    )
-    db.add(user)
-    await db.commit()
-    return {"message": "User registered successfully"}
+    try:
+        user = User(
+            username=data.username,
+            password_hash=hash_password(data.password)
+        )
+        db.add(user)
+        await db.commit()
+        return {"message": "User registered successfully"}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Signup error: {str(e)}")
 
 @router.post("/create-admin")
 async def create_admin(data: SignupRequest, db: AsyncSession = Depends(get_db)):

@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import NullPool
 from sqlalchemy import event, text
 from app.config import settings
 from app.logging_config import get_logger
@@ -14,21 +14,12 @@ logger = get_logger(__name__)
 engine = create_async_engine(
     settings.DATABASE_URL,
     # Connection pool settings for production
-    poolclass=QueuePool,
-    pool_size=20,  # Number of connections to maintain
-    max_overflow=30,  # Additional connections when pool is full
+    poolclass=NullPool,  # Use NullPool for async engines
     pool_pre_ping=True,  # Validate connections before use
     pool_recycle=3600,  # Recycle connections every hour
     # Performance settings
     echo=settings.DEBUG,  # SQL logging only in debug mode
     future=True,
-    # Connection timeout settings
-    connect_args={
-        "command_timeout": 60,
-        "server_settings": {
-            "application_name": "book_mgmt_agent",
-        }
-    }
 )
 
 # Session factory with proper configuration
