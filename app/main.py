@@ -189,6 +189,44 @@ async def get_book_by_id(book_id: int, db: AsyncSession = Depends(get_db)):
         logger.error(f"Failed to retrieve book {book_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve book")
 
+@app.put("/books/{book_id}", response_model=BookResponse, tags=["Books"])
+async def update_book(book_id: int, book_update: BookUpdate, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Book).where(Book.id == book_id))
+        book = result.scalar_one_or_none()
+        if not book:
+            raise HTTPException(status_code=404, detail="Book not found")
+        
+        if book_update.title is not None:
+            book.title = book_update.title
+        if book_update.author is not None:
+            book.author = book_update.author
+        if book_update.genre is not None:
+            book.genre = book_update.genre
+        if book_update.year_published is not None:
+            book.year_published = book_update.year_published
+        if book_update.summary is not None:
+            book.summary = book_update.summary
+        
+        await db.commit()
+        await db.refresh(book)
+        return book
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update book")
+
+@app.get("/books/dropdown/authors", response_model=List[str], tags=["Books"])
+async def get_authors_dropdown(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Book.author).distinct().where(Book.author.isnot(None)))
+    authors = [a for a in result.scalars().all() if a and a.strip()]
+    return sorted(authors)
+
+@app.get("/books/dropdown/genres", response_model=List[str], tags=["Books"])
+async def get_genres_dropdown(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Book.genre).distinct().where(Book.genre.isnot(None)))
+    genres = [g for g in result.scalars().all() if g and g.strip()]
+    return sorted(genres)
+
 # Search and RAG endpoints
 @app.post("/search", tags=["Search"])
 @app.get("/search", tags=["Search"])
