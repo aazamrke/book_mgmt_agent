@@ -4,27 +4,52 @@ from typing import Optional, List
 
 class BookBase(BaseModel):
     title: str
-    author: str
-    genre: str
+    author_id: int
+    genre_id: int
     year_published: int
-
 
 class BookCreate(BookBase):
     pass
 
 class BookUpdate(BaseModel):
     title: Optional[str] = None
-    author: Optional[str] = None
-    genre: Optional[str] = None
+    author_id: Optional[int] = None
+    genre_id: Optional[int] = None
     year_published: Optional[int] = None
     summary: Optional[str] = None
 
-class BookResponse(BookBase):
+class BookResponse(BaseModel):
     id: int
+    title: str
+    author_id: int
+    genre_id: int
+    year_published: int
     summary: Optional[str] = None
+    author_name: Optional[str] = None
+    genre_name: Optional[str] = None
 
     class Config:
-        from_attributes = True  # ✅ REQUIRED for SQLAlchemy
+        from_attributes = True
+
+class AuthorCreate(BaseModel):
+    name: str
+
+class AuthorResponse(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+class GenreCreate(BaseModel):
+    name: str
+
+class GenreResponse(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
 
 class ReviewCreate(BaseModel):
     user_id: int

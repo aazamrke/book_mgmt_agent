@@ -36,46 +36,31 @@ async def create_user(user_data: CreateUserRequest, db: AsyncSession = Depends(g
         if result.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Username already exists")
         
-        # Create user with raw SQL to avoid greenlet issues
-        from sqlalchemy import text
-        
-        # Insert user
-        user_insert = await db.execute(
-            text("INSERT INTO users (username, password_hash) VALUES (:username, :password_hash) RETURNING id"),
-            {"username": user_data.username, "password_hash": hash_password(user_data.password)}
+        # Create user using ORM
+        user = User(
+            username=user_data.username,
+            password_hash=hash_password(user_data.password)
         )
-        user_id = user_insert.scalar()
+        db.add(user)
+        await db.flush()  # Get user ID without committing
         
         # Handle role assignment
         if user_data.role_names:
-            for role_name in user_data.role_names:
-                # Get role id
-                role_result = await db.execute(
-                    text("SELECT id FROM roles WHERE name = :role_name"),
-                    {"role_name": role_name}
-                )
-                role_id = role_result.scalar()
-                if role_id:
-                    # Insert user-role relationship
-                    await db.execute(
-                        text("INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"),
-                        {"user_id": user_id, "role_id": role_id}
-                    )
+            role_result = await db.execute(select(Role).where(Role.name.in_(user_data.role_names)))
+            roles = role_result.scalars().all()
+            user.roles = roles
         else:
             # Assign default user role
-            role_result = await db.execute(
-                text("SELECT id FROM roles WHERE name = 'user'")
-            )
-            role_id = role_result.scalar()
-            if role_id:
-                await db.execute(
-                    text("INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"),
-                    {"user_id": user_id, "role_id": role_id}
-                )
+            role_result = await db.execute(select(Role).where(Role.name == 'user'))
+            default_role = role_result.scalar_one_or_none()
+            if default_role:
+                user.roles = [default_role]
         
         await db.commit()
-        return {"message": "User created successfully", "user_id": user_id}
+        return {"message": "User created successfully", "user_id": user.id}
         
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

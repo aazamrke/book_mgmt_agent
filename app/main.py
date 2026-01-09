@@ -11,12 +11,12 @@ from app.config import settings
 from app.logging_config import setup_logging, get_logger
 from app.middleware import RequestTrackingMiddleware, error_handler, get_metrics_data, MetricsMiddleware
 from app.database import get_db, init_database, close_database, db_health
-from app.models import Book, Review
+from app.models import Book, Review, Author, Genre
 from app.crud import *
 from app.llama3_minimal import generate_summary, generate_summary_llama3
 from app.auth import verify_user
 from app.recommendations import recommend_books
-from app.schemas import BookCreate, BookResponse, BookUpdate, ReviewCreate, ReviewResponse
+from app.schemas import BookCreate, BookResponse, BookUpdate, ReviewCreate, ReviewResponse, AuthorCreate, AuthorResponse, GenreCreate, GenreResponse
 from app.schemas import GenerateSummaryRequest, GenerateSummaryResponse
 from app.rag_pipeline_minimal import rag_pipeline
 from app.routes import auth, users, documents, ingestion
@@ -97,6 +97,53 @@ app.include_router(users.router)
 app.include_router(documents.router)
 app.include_router(ingestion.router)
 
+# Author and Genre Management
+@app.post("/authors", response_model=AuthorResponse, tags=["Authors"])
+async def create_author(author: AuthorCreate, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Author).where(Author.name == author.name))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Author already exists")
+        
+        db_author = Author(name=author.name)
+        db.add(db_author)
+        await db.commit()
+        await db.refresh(db_author)
+        return db_author
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create author")
+
+@app.get("/authors", response_model=List[AuthorResponse], tags=["Authors"])
+async def get_authors(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Author).order_by(Author.name))
+    return result.scalars().all()
+
+@app.post("/genres", response_model=GenreResponse, tags=["Genres"])
+async def create_genre(genre: GenreCreate, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Genre).where(Genre.name == genre.name))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Genre already exists")
+        
+        db_genre = Genre(name=genre.name)
+        db.add(db_genre)
+        await db.commit()
+        await db.refresh(db_genre)
+        return db_genre
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create genre")
+
+@app.get("/genres", response_model=List[GenreResponse], tags=["Genres"])
+async def get_genres(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Genre).order_by(Genre.name))
+    return result.scalars().all()
+
 # Health check endpoints
 @app.get("/health", tags=["Health"])
 async def health_check():
@@ -131,25 +178,31 @@ async def get_metrics():
     """Application metrics endpoint"""
     return get_metrics_data()
 
-# Book Management Endpoints with enhanced error handling
+
 @app.post("/books", response_model=BookResponse, tags=["Books"])
-async def add_book(
-    book: BookCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    """Create a new book with automatic RAG indexing"""
+async def add_book(book: BookCreate, db: AsyncSession = Depends(get_db)):
     try:
+        # Verify author and genre exist
+        author_result = await db.execute(select(Author).where(Author.id == book.author_id))
+        if not author_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Author not found")
+        
+        genre_result = await db.execute(select(Genre).where(Genre.id == book.genre_id))
+        if not genre_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Genre not found")
+        
         db_book = Book(**book.dict())
         db.add(db_book)
         await db.commit()
         await db.refresh(db_book)
         
-        # Index book for RAG (async to not block response)
+        # Index book for RAG
         asyncio.create_task(rag_pipeline.index_book(db, db_book.id))
         
         logger.info(f"Book created: {db_book.id}", extra={"book_id": db_book.id})
         return db_book
-        
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
         logger.error(f"Failed to create book: {str(e)}")
@@ -157,10 +210,28 @@ async def add_book(
 
 @app.get("/books", response_model=List[BookResponse], tags=["Books"])
 async def get_books(db: AsyncSession = Depends(get_db)):
-    """Get all books with pagination support"""
     try:
-        result = await db.execute(select(Book))
-        books = result.scalars().all()
+        result = await db.execute(
+            select(Book, Author.name.label("author_name"), Genre.name.label("genre_name"))
+            .join(Author, Book.author_id == Author.id)
+            .join(Genre, Book.genre_id == Genre.id)
+        )
+        books_data = result.all()
+        
+        books = []
+        for book, author_name, genre_name in books_data:
+            book_dict = {
+                "id": book.id,
+                "title": book.title,
+                "author_id": book.author_id,
+                "genre_id": book.genre_id,
+                "year_published": book.year_published,
+                "summary": book.summary,
+                "author_name": author_name,
+                "genre_name": genre_name
+            }
+            books.append(BookResponse(**book_dict))
+        
         logger.info(f"Retrieved {len(books)} books")
         return books
     except Exception as e:
@@ -197,12 +268,21 @@ async def update_book(book_id: int, book_update: BookUpdate, db: AsyncSession = 
         if not book:
             raise HTTPException(status_code=404, detail="Book not found")
         
+        # Verify author and genre if provided
+        if book_update.author_id is not None:
+            author_result = await db.execute(select(Author).where(Author.id == book_update.author_id))
+            if not author_result.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Author not found")
+            book.author_id = book_update.author_id
+        
+        if book_update.genre_id is not None:
+            genre_result = await db.execute(select(Genre).where(Genre.id == book_update.genre_id))
+            if not genre_result.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Genre not found")
+            book.genre_id = book_update.genre_id
+        
         if book_update.title is not None:
             book.title = book_update.title
-        if book_update.author is not None:
-            book.author = book_update.author
-        if book_update.genre is not None:
-            book.genre = book_update.genre
         if book_update.year_published is not None:
             book.year_published = book_update.year_published
         if book_update.summary is not None:
@@ -211,21 +291,21 @@ async def update_book(book_id: int, book_update: BookUpdate, db: AsyncSession = 
         await db.commit()
         await db.refresh(book)
         return book
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update book")
 
-@app.get("/books/dropdown/authors", response_model=List[str], tags=["Books"])
+@app.get("/books/dropdown/authors", response_model=List[AuthorResponse], tags=["Books"])
 async def get_authors_dropdown(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Book.author).distinct().where(Book.author.isnot(None)))
-    authors = [a for a in result.scalars().all() if a and a.strip()]
-    return sorted(authors)
+    result = await db.execute(select(Author).order_by(Author.name))
+    return result.scalars().all()
 
-@app.get("/books/dropdown/genres", response_model=List[str], tags=["Books"])
+@app.get("/books/dropdown/genres", response_model=List[GenreResponse], tags=["Books"])
 async def get_genres_dropdown(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Book.genre).distinct().where(Book.genre.isnot(None)))
-    genres = [g for g in result.scalars().all() if g and g.strip()]
-    return sorted(genres)
+    result = await db.execute(select(Genre).order_by(Genre.name))
+    return result.scalars().all()
 
 # Search and RAG endpoints
 @app.post("/search", tags=["Search"])
