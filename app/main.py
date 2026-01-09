@@ -1,311 +1,33 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database import get_db
+from sqlalchemy import select
+
+# Application imports
+from app.config import settings
+from app.logging_config import setup_logging, get_logger
+from app.middleware import RequestTrackingMiddleware, error_handler, metrics
+from app.database import get_db, init_database, close_database, db_health
 from app.models import Book, Review
 from app.crud import *
-from app.llama3 import generate_summary, generate_summary_llama3
+from app.llama3_minimal import generate_summary, generate_summary_llama3
 from app.auth import verify_user
 from app.recommendations import recommend_books
-from app.schemas import BookCreate, BookResponse, BookUpdate
-from app.schemas import ReviewCreate, ReviewResponse
-from app.models import Book
-from typing import List
-from app.routes import auth, users, documents, ingestion
-from fastapi.middleware.cors import CORSMiddleware
-from app.rag_pipeline_minimal import rag_pipeline
-
-app = FastAPI(title="Intelligent Book Management System")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(documents.router)
-app.include_router(ingestion.router)
-
-@app.post("/books",response_model=BookResponse)
-async def add_book(
-    book: BookCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    db_book = Book(**book.dict())
-    db.add(db_book)
-    await db.commit()
-    await db.refresh(db_book)
-    
-    # Index book for RAG
-    await rag_pipeline.index_book(db, db_book.id)
-    
-    return db_book
-
-@app.get("/books", response_model=List[BookResponse])
-async def get_books(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Book))
-    return result.scalars().all()
-
-@app.get("/books/{book_id}",response_model=BookResponse)
-async def get_book_by_id(book_id: int,db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Book).where(Book.id == book_id)
-    )
-    book = result.scalar_one_or_none()
-
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-    return book
-
-@app.put("/books/{book_id}",response_model=BookResponse,dependencies=[Depends(verify_user)])
-async def update_book_by_id(book_id: int,book_update: BookUpdate,db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Book).where(Book.id == book_id))
-    book = result.scalar_one_or_none()
-
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-
-    update_data = book_update.model_dump(exclude_unset=True)
-
-    for key, value in update_data.items():
-        setattr(book, key, value)
-
-    await db.commit()
-    await db.refresh(book)
-    
-    # Reindex book for RAG
-    await rag_pipeline.index_book(db, book.id)
-
-    return book
-
-@app.delete("/books/{book_id}",status_code=status.HTTP_204_NO_CONTENT,dependencies=[Depends(verify_user)])
-async def delete_book_by_id(book_id: int,db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Book).where(Book.id == book_id))
-    book = result.scalar_one_or_none()
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-    await db.delete(book)
-    await db.commit()
-
-@app.post(
-    "/books/{book_id}/reviews",
-    response_model=ReviewResponse,
-    status_code=status.HTTP_201_CREATED,
-    # dependencies=[Depends(verify_user)]
-)
-async def add_review_for_book(
-    book_id: int,
-    review: ReviewCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    # Ensure book exists
-    result = await db.execute(
-        select(Book).where(Book.id == book_id)
-    )
-    book = result.scalar_one_or_none()
-
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-
-    db_review = Review(
-        book_id=book_id,
-        user_id=review.user_id,
-        review_text=review.review_text,
-        rating=review.rating,
-    )
-
-    db.add(db_review)
-    await db.commit()
-    await db.refresh(db_review)
-    
-    # Reindex book to include new review
-    await rag_pipeline.index_book(db, book_id)
-
-    return db_review
-
-@app.get(
-    "/books/{book_id}/reviews",
-    response_model=List[ReviewResponse]
-)
-async def get_reviews_for_book(
-    book_id: int,
-    db: AsyncSession = Depends(get_db)
-):
-    # Ensure book exists
-    result = await db.execute(
-        select(Book).where(Book.id == book_id)
-    )
-    book = result.scalar_one_or_none()
-
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-
-    result = await db.execute(
-        select(Review).where(Review.book_id == book_id)
-    )
-    reviews = result.scalars().all()
-
-    return reviews
-
-
-# @app.post("/books/{id}/reviews")
-# async def add_book_review(id: int, review: Review, db: AsyncSession = Depends(get_db)):
-#     review.book_id = id
-#     return await add_review(db, review)
-
-@app.get("/books/{id}/summary")
-async def book_summary(id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Review).where(Review.book_id == id))
-    reviews = result.scalars().all()
-    avg_rating = sum(r.rating for r in reviews) / len(reviews)
-    summary = await generate_summary(" ".join(r.review_text for r in reviews))
-    return {"rating": avg_rating, "review_summary": summary}
-
-
-@app.post(
-    "/books/{book_id}/generate-summary",
-    response_model=dict,
-    dependencies=[Depends(verify_user)]
-)
-async def generate_and_save_book_summary(
-    book_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(Book).where(Book.id == book_id)
-    )
-    book = result.scalar_one_or_none()
-
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found"
-        )
-
-    prompt = (
-        f"Generate a concise summary for the book:\n"
-        f"Title: {book.title}\n"
-        f"Author: {book.author}\n"
-        f"Genre: {book.genre}\n"
-        f"Year Published: {book.year_published}\n"
-    )
-
-    summary = await generate_summary_llama3(prompt)
-
-    book.summary = summary
-    await db.commit()
-    await db.refresh(book)
-
-    return {
-        "book_id": book.id,
-        "summary": book.summary
-    }
-
+from app.schemas import BookCreate, BookResponse, BookUpdate, ReviewCreate, ReviewResponse
 from app.schemas import GenerateSummaryRequest, GenerateSummaryResponse
-from app.llama3 import generate_summary_llama3
+from app.rag_pipeline_minimal import rag_pipeline
+from app.routes import auth, users, documents, ingestion
 
-@app.post(
-    "/generate-summary",
-    response_model=GenerateSummaryResponse,
-)
-async def generate_summary_from_content(
-    payload: GenerateSummaryRequest
-):
-    summary = await generate_summary_llama3(
-        f"Summarize the following book content:\n{payload.content}"
-    )
-    return GenerateSummaryResponse(summary=summary)
+from typing import List
+import time
+import asyncio
 
+# Setup logging
+setup_logging(log_level=settings.LOG_LEVEL, log_file=settings.LOG_FILE)
+logger = get_logger(__name__)
 
-@app.get("/recommendations")
-async def recommendations(genre: str, db: AsyncSession = Depends(get_db)):
-    return await recommend_books(db, genre)
-
-@app.post("/search")
-async def search_books(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):
-    """Search books using RAG pipeline with fallback"""
-    # Try RAG search first
-    results = rag_pipeline.search_similar_books(query, limit)
-    
-    # If no RAG results, do simple database search
-    if not results:
-        db_result = await db.execute(
-            select(Book).where(
-                Book.title.ilike(f"%{query}%") | 
-                Book.author.ilike(f"%{query}%") |
-                Book.genre.ilike(f"%{query}%")
-            ).limit(limit)
-        )
-        books = db_result.scalars().all()
-        
-        results = [
-            {
-                "book_id": book.id,
-                "similarity_score": 1.0,
-                "metadata": {
-                    "book_id": book.id,
-                    "title": book.title,
-                    "author": book.author,
-                    "genre": book.genre
-                },
-                "content": f"Title: {book.title} Author: {book.author} Genre: {book.genre}"
-            }
-            for book in books
-        ]
-    
-    return {"query": query, "results": results}
-
-@app.get("/search")
-async def search_books_get(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):
-    """GET version of search for UI compatibility"""
-    return await search_books(query, limit, db)
-
-@app.post("/books/{book_id}/reindex")
-async def reindex_book(book_id: int, db: AsyncSession = Depends(get_db)):
-    """Manually reindex a book for RAG"""
-    await rag_pipeline.index_book(db, book_id)
-    return {"message": f"Book {book_id} reindexed successfully"}
-
-@app.post("/reindex-all")
-async def reindex_all_books(db: AsyncSession = Depends(get_db)):
-    """Reindex all books for RAG"""
-    result = await db.execute(select(Book))
-    books = result.scalars().all()
-    
-    indexed_count = 0
-    for book in books:
-        try:
-            await rag_pipeline.index_book(db, book.id)
-            indexed_count += 1
-        except Exception as e:
-            print(f"Failed to index book {book.id}: {e}")
-    
-    return {
-        "message": f"Reindexed {indexed_count} books successfully",
-        "total_in_store": len(rag_pipeline.embeddings_store)
-    }
-
-@app.get("/debug/embeddings")
-async def debug_embeddings():
-    """Debug endpoint to check embeddings store"""
-    return {
-        "total_books_indexed": len(rag_pipeline.embeddings_store),
-        "book_ids": list(rag_pipeline.embeddings_store.keys())
-    }
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):\n    \"\"\"Application lifespan management\"\"\"\n    # Startup\n    logger.info(f\"Starting {settings.APP_NAME} in {settings.APP_ENV} mode\")\n    \n    try:\n        # Initialize database\n        await init_database()\n        logger.info(\"Database initialized successfully\")\n        \n        # Warm up services\n        logger.info(\"Application startup completed\")\n        \n    except Exception as e:\n        logger.error(f\"Startup failed: {str(e)}\")\n        raise\n    \n    yield\n    \n    # Shutdown\n    logger.info(\"Shutting down application\")\n    try:\n        await close_database()\n        logger.info(\"Application shutdown completed\")\n    except Exception as e:\n        logger.error(f\"Shutdown error: {str(e)}\")\n\n# Create FastAPI application with production configuration\napp = FastAPI(\n    title=settings.APP_NAME,\n    description=\"Production-grade intelligent book management system with RAG capabilities\",\n    version=\"1.0.0\",\n    docs_url=\"/docs\" if settings.is_development else None,  # Disable docs in production\n    redoc_url=\"/redoc\" if settings.is_development else None,\n    openapi_url=\"/openapi.json\" if settings.is_development else None,\n    lifespan=lifespan\n)\n\n# Security middleware\nif settings.is_production:\n    app.add_middleware(\n        TrustedHostMiddleware,\n        allowed_hosts=[\"*\"]  # Configure with actual domains in production\n    )\n\n# CORS middleware\napp.add_middleware(\n    CORSMiddleware,\n    allow_origins=settings.CORS_ORIGINS,\n    allow_credentials=True,\n    allow_methods=[\"*\"],\n    allow_headers=[\"*\"],\n)\n\n# Custom middleware\napp.middleware(\"http\")(RequestTrackingMiddleware(app))\napp.middleware(\"http\")(metrics)\n\n# Global exception handler\napp.add_exception_handler(Exception, error_handler)\n\n# Include routers\napp.include_router(auth.router)\napp.include_router(users.router)\napp.include_router(documents.router)\napp.include_router(ingestion.router)\n\n# Health check endpoints\n@app.get(\"/health\", tags=[\"Health\"])\nasync def health_check():\n    \"\"\"Basic health check endpoint\"\"\"\n    return {\n        \"status\": \"healthy\",\n        \"timestamp\": time.time(),\n        \"version\": \"1.0.0\",\n        \"environment\": settings.APP_ENV\n    }\n\n@app.get(\"/health/detailed\", tags=[\"Health\"])\nasync def detailed_health_check():\n    \"\"\"Detailed health check with database and metrics\"\"\"\n    db_healthy = await db_health.check_health()\n    app_metrics = metrics.get_metrics()\n    \n    return {\n        \"status\": \"healthy\" if db_healthy else \"unhealthy\",\n        \"timestamp\": time.time(),\n        \"version\": \"1.0.0\",\n        \"environment\": settings.APP_ENV,\n        \"database\": {\n            \"status\": \"healthy\" if db_healthy else \"unhealthy\",\n            \"last_check\": db_health.last_check\n        },\n        \"metrics\": app_metrics\n    }\n\n@app.get(\"/metrics\", tags=[\"Monitoring\"])\nasync def get_metrics():\n    \"\"\"Application metrics endpoint\"\"\"\n    return metrics.get_metrics()\n\n# Book Management Endpoints with enhanced error handling\n@app.post(\"/books\", response_model=BookResponse, tags=[\"Books\"])\nasync def add_book(\n    book: BookCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Create a new book with automatic RAG indexing\"\"\"\n    try:\n        db_book = Book(**book.dict())\n        db.add(db_book)\n        await db.commit()\n        await db.refresh(db_book)\n        \n        # Index book for RAG (async to not block response)\n        asyncio.create_task(rag_pipeline.index_book(db, db_book.id))\n        \n        logger.info(f\"Book created: {db_book.id}\", extra={\"book_id\": db_book.id})\n        return db_book\n        \n    except Exception as e:\n        await db.rollback()\n        logger.error(f\"Failed to create book: {str(e)}\")\n        raise HTTPException(status_code=500, detail=\"Failed to create book\")\n\n@app.get(\"/books\", response_model=List[BookResponse], tags=[\"Books\"])\nasync def get_books(db: AsyncSession = Depends(get_db)):\n    \"\"\"Get all books with pagination support\"\"\"\n    try:\n        result = await db.execute(select(Book))\n        books = result.scalars().all()\n        logger.info(f\"Retrieved {len(books)} books\")\n        return books\n    except Exception as e:\n        logger.error(f\"Failed to retrieve books: {str(e)}\")\n        raise HTTPException(status_code=500, detail=\"Failed to retrieve books\")\n\n@app.get(\"/books/{book_id}\", response_model=BookResponse, tags=[\"Books\"])\nasync def get_book_by_id(book_id: int, db: AsyncSession = Depends(get_db)):\n    \"\"\"Get book by ID with proper error handling\"\"\"\n    try:\n        result = await db.execute(select(Book).where(Book.id == book_id))\n        book = result.scalar_one_or_none()\n\n        if not book:\n            raise HTTPException(\n                status_code=status.HTTP_404_NOT_FOUND,\n                detail=f\"Book with id {book_id} not found\"\n            )\n        \n        logger.info(f\"Retrieved book: {book_id}\", extra={\"book_id\": book_id})\n        return book\n        \n    except HTTPException:\n        raise\n    except Exception as e:\n        logger.error(f\"Failed to retrieve book {book_id}: {str(e)}\")\n        raise HTTPException(status_code=500, detail=\"Failed to retrieve book\")\n\n# Search and RAG endpoints\n@app.post(\"/search\", tags=[\"Search\"])\n@app.get(\"/search\", tags=[\"Search\"])\nasync def search_books(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):\n    \"\"\"Semantic book search with fallback\"\"\"\n    try:\n        # Try RAG search first\n        results = rag_pipeline.search_similar_books(query, limit)\n        \n        # Fallback to database search if no RAG results\n        if not results:\n            db_result = await db.execute(\n                select(Book).where(\n                    Book.title.ilike(f\"%{query}%\") | \n                    Book.author.ilike(f\"%{query}%\") |\n                    Book.genre.ilike(f\"%{query}%\")\n                ).limit(limit)\n            )\n            books = db_result.scalars().all()\n            \n            results = [\n                {\n                    \"book_id\": book.id,\n                    \"similarity_score\": 1.0,\n                    \"metadata\": {\n                        \"book_id\": book.id,\n                        \"title\": book.title,\n                        \"author\": book.author,\n                        \"genre\": book.genre\n                    },\n                    \"content\": f\"Title: {book.title} Author: {book.author} Genre: {book.genre}\"\n                }\n                for book in books\n            ]\n        \n        logger.info(f\"Search completed: '{query}' returned {len(results)} results\")\n        return {\"query\": query, \"results\": results}\n        \n    except Exception as e:\n        logger.error(f\"Search failed for query '{query}': {str(e)}\")\n        raise HTTPException(status_code=500, detail=\"Search failed\")\n\n# Additional endpoints with proper error handling...\n@app.post(\"/reindex-all\", tags=[\"Search\"])\nasync def reindex_all_books(db: AsyncSession = Depends(get_db)):\n    \"\"\"Reindex all books for RAG with progress tracking\"\"\"\n    try:\n        result = await db.execute(select(Book))\n        books = result.scalars().all()\n        \n        indexed_count = 0\n        for book in books:\n            try:\n                await rag_pipeline.index_book(db, book.id)\n                indexed_count += 1\n            except Exception as e:\n                logger.warning(f\"Failed to index book {book.id}: {str(e)}\")\n        \n        logger.info(f\"Reindexed {indexed_count}/{len(books)} books\")\n        return {\n            \"message\": f\"Reindexed {indexed_count} books successfully\",\n            \"total_books\": len(books),\n            \"indexed_count\": indexed_count,\n            \"total_in_store\": len(rag_pipeline.embeddings_store)\n        }\n        \n    except Exception as e:\n        logger.error(f\"Reindexing failed: {str(e)}\")\n        raise HTTPException(status_code=500, detail=\"Reindexing failed\")\n\n@app.get(\"/debug/embeddings\", tags=[\"Debug\"])\nasync def debug_embeddings():\n    \"\"\"Debug endpoint for embeddings store\"\"\"\n    if not settings.is_development:\n        raise HTTPException(status_code=404, detail=\"Not found\")\n    \n    return {\n        \"total_books_indexed\": len(rag_pipeline.embeddings_store),\n        \"book_ids\": list(rag_pipeline.embeddings_store.keys())\n    }\n\nif __name__ == \"__main__\":\n    import uvicorn\n    uvicorn.run(\n        \"app.main:app\",\n        host=settings.HOST,\n        port=settings.PORT,\n        workers=settings.WORKERS if settings.is_production else 1,\n        log_level=settings.LOG_LEVEL.lower(),\n        access_log=True,\n        reload=settings.is_development\n    )", "oldStr": "from fastapi import FastAPI, Depends, HTTPException, status\nfrom sqlalchemy.ext.asyncio import AsyncSession\nfrom app.database import get_db\nfrom app.models import Book, Review\nfrom app.crud import *\nfrom app.llama3 import generate_summary, generate_summary_llama3\nfrom app.auth import verify_user\nfrom app.recommendations import recommend_books\nfrom app.schemas import BookCreate, BookResponse, BookUpdate\nfrom app.schemas import ReviewCreate, ReviewResponse\nfrom app.models import Book\nfrom typing import List\nfrom app.routes import auth, users, documents, ingestion\nfrom fastapi.middleware.cors import CORSMiddleware\nfrom app.rag_pipeline_minimal import rag_pipeline\n\napp = FastAPI(title=\"Intelligent Book Management System\")\napp.add_middleware(\n    CORSMiddleware,\n    allow_origins=[\"http://localhost:3000\"],\n    allow_credentials=True,\n    allow_methods=[\"*\"],\n    allow_headers=[\"*\"],\n)\napp.include_router(auth.router)\napp.include_router(users.router)\napp.include_router(documents.router)\napp.include_router(ingestion.router)\n\n@app.post(\"/books\",response_model=BookResponse)\nasync def add_book(\n    book: BookCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    db_book = Book(**book.dict())\n    db.add(db_book)\n    await db.commit()\n    await db.refresh(db_book)\n    \n    # Index book for RAG\n    await rag_pipeline.index_book(db, db_book.id)\n    \n    return db_book\n\n@app.get(\"/books\", response_model=List[BookResponse])\nasync def get_books(db: AsyncSession = Depends(get_db)):\n    result = await db.execute(select(Book))\n    return result.scalars().all()\n\n@app.get(\"/books/{book_id}\",response_model=BookResponse)\nasync def get_book_by_id(book_id: int,db: AsyncSession = Depends(get_db)):\n    result = await db.execute(\n        select(Book).where(Book.id == book_id)\n    )\n    book = result.scalar_one_or_none()\n\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n    return book\n\n@app.put(\"/books/{book_id}\",response_model=BookResponse,dependencies=[Depends(verify_user)])\nasync def update_book_by_id(book_id: int,book_update: BookUpdate,db: AsyncSession = Depends(get_db)):\n    result = await db.execute(select(Book).where(Book.id == book_id))\n    book = result.scalar_one_or_none()\n\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n\n    update_data = book_update.model_dump(exclude_unset=True)\n\n    for key, value in update_data.items():\n        setattr(book, key, value)\n\n    await db.commit()\n    await db.refresh(book)\n    \n    # Reindex book for RAG\n    await rag_pipeline.index_book(db, book.id)\n\n    return book\n\n@app.delete(\"/books/{book_id}\",status_code=status.HTTP_204_NO_CONTENT,dependencies=[Depends(verify_user)])\nasync def delete_book_by_id(book_id: int,db: AsyncSession = Depends(get_db)):\n    result = await db.execute(select(Book).where(Book.id == book_id))\n    book = result.scalar_one_or_none()\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n    await db.delete(book)\n    await db.commit()\n\n@app.post(\n    \"/books/{book_id}/reviews\",\n    response_model=ReviewResponse,\n    status_code=status.HTTP_201_CREATED,\n    # dependencies=[Depends(verify_user)]\n)\nasync def add_review_for_book(\n    book_id: int,\n    review: ReviewCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    # Ensure book exists\n    result = await db.execute(\n        select(Book).where(Book.id == book_id)\n    )\n    book = result.scalar_one_or_none()\n\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n\n    db_review = Review(\n        book_id=book_id,\n        user_id=review.user_id,\n        review_text=review.review_text,\n        rating=review.rating,\n    )\n\n    db.add(db_review)\n    await db.commit()\n    await db.refresh(db_review)\n    \n    # Reindex book to include new review\n    await rag_pipeline.index_book(db, book_id)\n\n    return db_review\n\n@app.get(\n    \"/books/{book_id}/reviews\",\n    response_model=List[ReviewResponse]\n)\nasync def get_reviews_for_book(\n    book_id: int,\n    db: AsyncSession = Depends(get_db)\n):\n    # Ensure book exists\n    result = await db.execute(\n        select(Book).where(Book.id == book_id)\n    )\n    book = result.scalar_one_or_none()\n\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n\n    result = await db.execute(\n        select(Review).where(Review.book_id == book_id)\n    )\n    reviews = result.scalars().all()\n\n    return reviews\n\n\n# @app.post(\"/books/{id}/reviews\")\n# async def add_book_review(id: int, review: Review, db: AsyncSession = Depends(get_db)):\n#     review.book_id = id\n#     return await add_review(db, review)\n\n@app.get(\"/books/{id}/summary\")\nasync def book_summary(id: int, db: AsyncSession = Depends(get_db)):\n    result = await db.execute(select(Review).where(Review.book_id == id))\n    reviews = result.scalars().all()\n    avg_rating = sum(r.rating for r in reviews) / len(reviews)\n    summary = await generate_summary(\" \".join(r.review_text for r in reviews))\n    return {\"rating\": avg_rating, \"review_summary\": summary}\n\n\n@app.post(\n    \"/books/{book_id}/generate-summary\",\n    response_model=dict,\n    dependencies=[Depends(verify_user)]\n)\nasync def generate_and_save_book_summary(\n    book_id: int,\n    db: AsyncSession = Depends(get_db),\n):\n    result = await db.execute(\n        select(Book).where(Book.id == book_id)\n    )\n    book = result.scalar_one_or_none()\n\n    if not book:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Book not found\"\n        )\n\n    prompt = (\n        f\"Generate a concise summary for the book:\\n\"\n        f\"Title: {book.title}\\n\"\n        f\"Author: {book.author}\\n\"\n        f\"Genre: {book.genre}\\n\"\n        f\"Year Published: {book.year_published}\\n\"\n    )\n\n    summary = await generate_summary_llama3(prompt)\n\n    book.summary = summary\n    await db.commit()\n    await db.refresh(book)\n\n    return {\n        \"book_id\": book.id,\n        \"summary\": book.summary\n    }\n\nfrom app.schemas import GenerateSummaryRequest, GenerateSummaryResponse\nfrom app.llama3 import generate_summary_llama3\n\n@app.post(\n    \"/generate-summary\",\n    response_model=GenerateSummaryResponse,\n)\nasync def generate_summary_from_content(\n    payload: GenerateSummaryRequest\n):\n    summary = await generate_summary_llama3(\n        f\"Summarize the following book content:\\n{payload.content}\"\n    )\n    return GenerateSummaryResponse(summary=summary)\n\n\n@app.get(\"/recommendations\")\nasync def recommendations(genre: str, db: AsyncSession = Depends(get_db)):\n    return await recommend_books(db, genre)\n\n@app.post(\"/search\")\n@app.get(\"/search\")\nasync def search_books(query: str, limit: int = 5, db: AsyncSession = Depends(get_db)):\n    \"\"\"Search books using RAG pipeline with fallback\"\"\"\n    # Try RAG search first\n    results = rag_pipeline.search_similar_books(query, limit)\n    \n    # If no RAG results, do simple database search\n    if not results:\n        db_result = await db.execute(\n            select(Book).where(\n                Book.title.ilike(f\"%{query}%\") | \n                Book.author.ilike(f\"%{query}%\") |\n                Book.genre.ilike(f\"%{query}%\")\n            ).limit(limit)\n        )\n        books = db_result.scalars().all()\n        \n        results = [\n            {\n                \"book_id\": book.id,\n                \"similarity_score\": 1.0,\n                \"metadata\": {\n                    \"book_id\": book.id,\n                    \"title\": book.title,\n                    \"author\": book.author,\n                    \"genre\": book.genre\n                },\n                \"content\": f\"Title: {book.title} Author: {book.author} Genre: {book.genre}\"\n            }\n            for book in books\n        ]\n    \n    return {\"query\": query, \"results\": results}\n\n@app.post(\"/books/{book_id}/reindex\")\nasync def reindex_book(book_id: int, db: AsyncSession = Depends(get_db)):\n    \"\"\"Manually reindex a book for RAG\"\"\"\n    await rag_pipeline.index_book(db, book_id)\n    return {\"message\": f\"Book {book_id} reindexed successfully\"}\n\n@app.post(\"/reindex-all\")\nasync def reindex_all_books(db: AsyncSession = Depends(get_db)):\n    \"\"\"Reindex all books for RAG\"\"\"\n    result = await db.execute(select(Book))\n    books = result.scalars().all()\n    \n    indexed_count = 0\n    for book in books:\n        try:\n            await rag_pipeline.index_book(db, book.id)\n            indexed_count += 1\n        except Exception as e:\n            print(f\"Failed to index book {book.id}: {e}\")\n    \n    return {\n        \"message\": f\"Reindexed {indexed_count} books successfully\",\n        \"total_in_store\": len(rag_pipeline.embeddings_store)\n    }\n\n@app.get(\"/debug/embeddings\")\nasync def debug_embeddings():\n    \"\"\"Debug endpoint to check embeddings store\"\"\"\n    return {\n        \"total_books_indexed\": len(rag_pipeline.embeddings_store),\n        \"book_ids\": list(rag_pipeline.embeddings_store.keys())\n    }"}]
