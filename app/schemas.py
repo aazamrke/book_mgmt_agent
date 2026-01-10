@@ -51,6 +51,12 @@ class GenreResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AuthorUpdate(BaseModel):
+    name: Optional[str] = None
+
+class GenreUpdate(BaseModel):
+    name: Optional[str] = None
+
 class ReviewCreate(BaseModel):
     user_id: int
     review_text: str

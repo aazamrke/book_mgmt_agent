@@ -6,6 +6,7 @@ Intelligent book management system with RAG (Retrieval-Augmented Generation) cap
 
 ### 📚 Book Management
 - **CRUD Operations**: Create, read, update, delete books
+- **Author & Genre Management**: Separate entities with foreign key relationships
 - **Book Reviews**: Add and view book reviews with ratings
 - **AI Summaries**: Generate book summaries using LLaMA 3
 - **Recommendations**: Get book recommendations by genre
@@ -20,7 +21,7 @@ Intelligent book management system with RAG (Retrieval-Augmented Generation) cap
 - **Authentication**: JWT-based login/signup system
 - **Role-Based Access**: Admin-only endpoints for user management
 - **User CRUD**: Create, update, delete users (admin only)
-- **Role Assignment**: Assign roles to users
+- **Granular Permissions**: Read, write, delete, and admin permissions per role
 
 ### 📄 Document Management
 - **File Upload**: Upload documents with size tracking
@@ -43,15 +44,33 @@ Intelligent book management system with RAG (Retrieval-Augmented Generation) cap
 | POST | `/auth/create-admin` | Create admin user |
 | POST | `/auth/logout` | User logout |
 
+### Authors
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/authors` | Create new author |
+| GET | `/authors` | List all authors |
+| PUT | `/authors/{id}` | Update author |
+| DELETE | `/authors/{id}` | Delete author |
+
+### Genres
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/genres` | Create new genre |
+| GET | `/genres` | List all genres |
+| PUT | `/genres/{id}` | Update genre |
+| DELETE | `/genres/{id}` | Delete genre |
+
 ### Books
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/books` | Create new book |
-| GET | `/books` | List all books |
+| POST | `/books` | Create new book (requires author_id, genre_id) |
+| GET | `/books` | List all books with author/genre names |
 | GET | `/books/{id}` | Get book by ID |
 | PUT | `/books/{id}` | Update book (auth required) |
 | DELETE | `/books/{id}` | Delete book (auth required) |
 | POST | `/books/{id}/generate-summary` | Generate AI summary |
+| GET | `/books/dropdown/authors` | Get authors for dropdown |
+| GET | `/books/dropdown/genres` | Get genres for dropdown |
 
 ### Reviews
 | Method | Endpoint | Description |
@@ -91,6 +110,22 @@ Intelligent book management system with RAG (Retrieval-Augmented Generation) cap
 |--------|----------|-------------|
 | GET | `/recommendations` | Get book recommendations |
 | POST | `/generate-summary` | Generate content summary |
+
+## Database Schema
+
+### Core Entities
+- **Authors**: `id`, `name` (unique)
+- **Genres**: `id`, `name` (unique)
+- **Books**: `id`, `title`, `author_id` (FK), `genre_id` (FK), `year_published`, `summary`
+- **Reviews**: `id`, `book_id` (FK), `user_id`, `review_text`, `rating`
+- **Users**: `id`, `username`, `password_hash`, `is_active`, `created_at`
+- **Roles**: `id`, `name`, `can_read`, `can_write`, `can_delete`, `is_admin`
+
+### Relationships
+- Books → Authors (Many-to-One)
+- Books → Genres (Many-to-One)
+- Books → Reviews (One-to-Many)
+- Users → Roles (Many-to-Many)
 
 ## Setup
 
@@ -138,13 +173,56 @@ AWS_REGION=us-east-1
 # Create database tables
 python -c "from app.database import engine, Base; from app.models import *; import asyncio; asyncio.run(Base.metadata.create_all(bind=engine.sync_engine))"
 
-# Add file_size column (if needed)
-python add_file_size.py
+# Run migration for author/genre foreign keys
+python migrate_author_genre.py
 ```
 
-5. **Run Application**
+5. **Add Sample Data**
+```bash
+# Add sample authors, genres, and books
+python add_sample_books.py
+```
+
+6. **Run Application**
 ```bash
 uvicorn app.main:app --reload
+```
+
+## Usage Examples
+
+### Create Author and Genre
+```bash
+# Create author
+curl -X POST "http://localhost:8000/authors" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "J.K. Rowling"}'
+
+# Create genre
+curl -X POST "http://localhost:8000/genres" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Fantasy"}'
+```
+
+### Create Book with Foreign Keys
+```bash
+curl -X POST "http://localhost:8000/books" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Harry Potter",
+    "author_id": 1,
+    "genre_id": 1,
+    "year_published": 1997
+  }'
+```
+
+### Update Book
+```bash
+curl -X PUT "http://localhost:8000/books/1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "author_id": 2,
+    "genre_id": 3
+  }'
 ```
 
 ## Development vs Production
@@ -190,13 +268,13 @@ pytest tests/ -v
 
 ### Authentication
 - **JWT Tokens**: Stateless authentication
-- **Role-Based**: Admin/user permissions
-- **Secure**: bcrypt password hashing
+- **Role-Based**: Granular permissions (read/write/delete/admin)
+- **Secure**: SHA-256 password hashing
 
 ### Database
-- **PostgreSQL**: Primary database
+- **PostgreSQL**: Primary database with foreign key relationships
 - **SQLAlchemy**: ORM with async support
-- **Models**: Books, Reviews, Users, Roles, Documents
+- **Models**: Authors, Genres, Books, Reviews, Users, Roles, Documents
 
 ## API Documentation
 

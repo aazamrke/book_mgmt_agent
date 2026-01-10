@@ -16,7 +16,7 @@ from app.crud import *
 from app.llama3_minimal import generate_summary, generate_summary_llama3
 from app.auth import verify_user
 from app.recommendations import recommend_books
-from app.schemas import BookCreate, BookResponse, BookUpdate, ReviewCreate, ReviewResponse, AuthorCreate, AuthorResponse, GenreCreate, GenreResponse
+from app.schemas import BookCreate, BookResponse, BookUpdate, ReviewCreate, ReviewResponse, AuthorCreate, AuthorResponse, GenreCreate, GenreResponse, AuthorUpdate, GenreUpdate
 from app.schemas import GenerateSummaryRequest, GenerateSummaryResponse
 from app.rag_pipeline_minimal import rag_pipeline
 from app.routes import auth, users, documents, ingestion
@@ -121,6 +121,51 @@ async def get_authors(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Author).order_by(Author.name))
     return result.scalars().all()
 
+@app.put("/authors/{author_id}", response_model=AuthorResponse, tags=["Authors"])
+async def update_author(author_id: int, author_update: AuthorUpdate, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Author).where(Author.id == author_id))
+        author = result.scalar_one_or_none()
+        if not author:
+            raise HTTPException(status_code=404, detail="Author not found")
+        
+        if author_update.name is not None:
+            # Check if name already exists
+            existing = await db.execute(select(Author).where(Author.name == author_update.name, Author.id != author_id))
+            if existing.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Author name already exists")
+            author.name = author_update.name
+        
+        await db.commit()
+        await db.refresh(author)
+        return author
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update author")
+
+@app.delete("/authors/{author_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Authors"])
+async def delete_author(author_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Author).where(Author.id == author_id))
+        author = result.scalar_one_or_none()
+        if not author:
+            raise HTTPException(status_code=404, detail="Author not found")
+        
+        # Check if author has books
+        books_result = await db.execute(select(Book).where(Book.author_id == author_id))
+        if books_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Cannot delete author with existing books")
+        
+        await db.delete(author)
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete author")
+
 @app.post("/genres", response_model=GenreResponse, tags=["Genres"])
 async def create_genre(genre: GenreCreate, db: AsyncSession = Depends(get_db)):
     try:
@@ -143,6 +188,51 @@ async def create_genre(genre: GenreCreate, db: AsyncSession = Depends(get_db)):
 async def get_genres(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Genre).order_by(Genre.name))
     return result.scalars().all()
+
+@app.put("/genres/{genre_id}", response_model=GenreResponse, tags=["Genres"])
+async def update_genre(genre_id: int, genre_update: GenreUpdate, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Genre).where(Genre.id == genre_id))
+        genre = result.scalar_one_or_none()
+        if not genre:
+            raise HTTPException(status_code=404, detail="Genre not found")
+        
+        if genre_update.name is not None:
+            # Check if name already exists
+            existing = await db.execute(select(Genre).where(Genre.name == genre_update.name, Genre.id != genre_id))
+            if existing.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Genre name already exists")
+            genre.name = genre_update.name
+        
+        await db.commit()
+        await db.refresh(genre)
+        return genre
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update genre")
+
+@app.delete("/genres/{genre_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Genres"])
+async def delete_genre(genre_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Genre).where(Genre.id == genre_id))
+        genre = result.scalar_one_or_none()
+        if not genre:
+            raise HTTPException(status_code=404, detail="Genre not found")
+        
+        # Check if genre has books
+        books_result = await db.execute(select(Book).where(Book.genre_id == genre_id))
+        if books_result.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Cannot delete genre with existing books")
+        
+        await db.delete(genre)
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete genre")
 
 # Health check endpoints
 @app.get("/health", tags=["Health"])
